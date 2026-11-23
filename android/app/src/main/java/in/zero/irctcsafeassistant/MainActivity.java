@@ -4,8 +4,8 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.os.Bundle;
 import android.graphics.Color;
+import android.content.SharedPreferences;
 import android.view.View;
-import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
 import android.webkit.WebView;
@@ -23,9 +23,12 @@ public class MainActivity extends Activity {
     private WebView web;
     private EditText passengerName, passengerAge;
     private String gender = "Male";
+    private SharedPreferences prefs;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        prefs = getSharedPreferences("passenger_profile", MODE_PRIVATE);
+        gender = prefs.getString("gender", "Male");
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.WHITE);
@@ -38,7 +41,7 @@ public class MainActivity extends Activity {
 
         LinearLayout actions = new LinearLayout(this);
         actions.setPadding(6,6,6,6);
-        Button back = button("Back"), reload = button("Reload"), details = button("Passenger details"), fill = button("Fill details");
+        Button back = button("Back"), reload = button("Reload"), details = button("Passenger details"), fill = button("Fill now");
         actions.addView(back, weight()); actions.addView(reload, weight());
         actions.addView(details, weight()); actions.addView(fill, weight());
         root.addView(actions);
@@ -61,6 +64,10 @@ public class MainActivity extends Activity {
                 Toast.makeText(MainActivity.this, "External navigation blocked for safety", Toast.LENGTH_SHORT).show();
                 return true;
             }
+            @Override public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                installAutofillWatcher();
+            }
         });
         root.addView(web, new LinearLayout.LayoutParams(-1,0,1));
         setContentView(root);
@@ -81,31 +88,55 @@ public class MainActivity extends Activity {
     private void showPassengerDialog() {
         LinearLayout box = new LinearLayout(this); box.setPadding(24,8,24,0); box.setOrientation(LinearLayout.VERTICAL);
         passengerName = new EditText(this); passengerName.setHint("Passenger full name");
+        passengerName.setText(prefs.getString("name", ""));
         passengerAge = new EditText(this); passengerAge.setHint("Age"); passengerAge.setInputType(InputType.TYPE_CLASS_NUMBER);
+        passengerAge.setText(prefs.getString("age", ""));
         box.addView(passengerName); box.addView(passengerAge);
-        new AlertDialog.Builder(this).setTitle("Passenger details (temporary)")
-            .setView(box).setSingleChoiceItems(new String[]{"Male","Female","Transgender"},0,(d,w)->gender=new String[]{"Male","Female","Transgender"}[w])
-            .setPositiveButton("Save on this screen", (d,w)->Toast.makeText(this,"Details ready. Tap Fill details on the booking form.",Toast.LENGTH_LONG).show())
+        String[] genders = {"Male","Female","Transgender"};
+        int selected = gender.equals("Female") ? 1 : gender.equals("Transgender") ? 2 : 0;
+        new AlertDialog.Builder(this).setTitle("Passenger details")
+            .setView(box).setSingleChoiceItems(genders,selected,(d,w)->gender=genders[w])
+            .setPositiveButton("Save & enable autofill", (d,w)->{
+                String name=passengerName.getText().toString().trim(), age=passengerAge.getText().toString().trim();
+                if(name.isEmpty() || age.isEmpty()) { Toast.makeText(this,"Enter passenger name and age",Toast.LENGTH_SHORT).show(); return; }
+                prefs.edit().putString("name",name).putString("age",age).putString("gender",gender).apply();
+                Toast.makeText(this,"Saved on this device. Autofill will run on IRCTC pages when matching fields appear.",Toast.LENGTH_LONG).show();
+                installAutofillWatcher();
+            })
             .setNegativeButton("Cancel",null).show();
     }
 
+    private String autofillScript() {
+        String name=JSONObject.quote(prefs.getString("name",""));
+        String age=JSONObject.quote(prefs.getString("age",""));
+        String sex=JSONObject.quote(prefs.getString("gender","Male"));
+        return "(function(){const vals=[{v:"+name+",keys:['passenger name','name']},{v:"+age+",keys:['age']},{v:"+sex+",keys:['gender','sex']}];" +
+          "function scan(){let count=0;const fields=[...document.querySelectorAll('input,select,textarea')];" +
+          "for(const f of fields){if(!f.offsetParent||f.disabled||f.readOnly)continue;" +
+          "const type=(f.type||'').toLowerCase();if(['password','email','tel','hidden','checkbox','radio','file'].includes(type))continue;" +
+          "const hint=((f.getAttribute('aria-label')||'')+' '+(f.placeholder||'')+' '+(f.name||'')+' '+(f.id||'')+' '+(f.labels?[...f.labels].map(x=>x.innerText).join(' '):'')).toLowerCase();" +
+          "if(/captcha|otp|verification|payment|upi|card|account|username|login/.test(hint))continue;" +
+          "for(const item of vals){if(!item.v||!item.keys.some(k=>hint.includes(k)))continue;" +
+          "if(f.dataset.safeAssistantFilled==='1')break;" +
+          "if(f.tagName==='SELECT'){const o=[...f.options].find(x=>x.text.toLowerCase().includes(item.v.toLowerCase())||x.value.toLowerCase()===item.v.toLowerCase());if(!o)break;f.value=o.value;}" +
+          "else {const setter=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(f),'value')?.set;if(setter)setter.call(f,item.v);else f.value=item.v;}" +
+          "f.dataset.safeAssistantFilled='1';f.dispatchEvent(new Event('input',{bubbles:true}));f.dispatchEvent(new Event('change',{bubbles:true}));count++;break;}}" +
+          "}return count;} scan(); if(!window.__safeAssistantObserver){window.__safeAssistantObserver=new MutationObserver(()=>scan());window.__safeAssistantObserver.observe(document.documentElement,{childList:true,subtree:true});}" +
+          "if(!window.__safeAssistantHistory){window.__safeAssistantHistory=true;['pushState','replaceState'].forEach(k=>{const old=history[k];history[k]=function(){const r=old.apply(this,arguments);setTimeout(scan,300);return r;};});window.addEventListener('popstate',()=>setTimeout(scan,300));}" +
+          "return 'watching';})()";
+    }
+
+    private void installAutofillWatcher() {
+        if (web == null || prefs.getString("name","").isEmpty() || prefs.getString("age","").isEmpty()) return;
+        web.evaluateJavascript(autofillScript(), null);
+    }
+
     private void fillPassenger() {
-        if (passengerName == null || passengerName.getText().toString().trim().isEmpty()
-                || passengerAge == null || passengerAge.getText().toString().trim().isEmpty()) {
-            Toast.makeText(this,"Enter passenger name and age first",Toast.LENGTH_SHORT).show(); return;
+        if (prefs.getString("name","").isEmpty() || prefs.getString("age","").isEmpty()) {
+            showPassengerDialog(); return;
         }
-        try {
-            String name = JSONObject.quote(passengerName.getText().toString().trim());
-            String age = JSONObject.quote(passengerAge.getText().toString().trim());
-            String sex = JSONObject.quote(gender);
-            String js = "(function(){const vals=[{v:"+name+",keys:['passenger name','name']},{v:"+age+",keys:['age']},{v:"+sex+",keys:['gender','sex']}];" +
-                "let changed=0; const fields=[...document.querySelectorAll('input,select,textarea')].filter(e=>e.offsetParent!==null && !e.disabled && !e.readOnly);" +
-                "for(const f of fields){const hint=((f.getAttribute('aria-label')||'')+' '+(f.placeholder||'')+' '+(f.name||'')+' '+(f.id||'')+' '+(f.labels?[...f.labels].map(x=>x.innerText).join(' '):'')).toLowerCase();" +
-                "for(const item of vals){if(item.keys.some(k=>hint.includes(k))){if(f.tagName==='SELECT'){const o=[...f.options].find(x=>x.text.toLowerCase().includes(item.v.toLowerCase())||x.value.toLowerCase()===item.v.toLowerCase());if(o)f.value=o.value;}else f.value=item.v;" +
-                "f.dispatchEvent(new Event('input',{bubbles:true}));f.dispatchEvent(new Event('change',{bubbles:true}));changed++;break;}}}" +
-                "return changed;})()";
-            web.evaluateJavascript(js, value -> Toast.makeText(this,"Filled " + value + " matching field(s). Review every field before continuing.",Toast.LENGTH_LONG).show());
-        } catch(Exception e) { Toast.makeText(this,"Could not fill fields",Toast.LENGTH_SHORT).show(); }
+        web.evaluateJavascript(autofillScript(), value ->
+            Toast.makeText(this,"Autofill checked this page. Review all details before continuing.",Toast.LENGTH_LONG).show());
     }
 
     @Override protected void onSaveInstanceState(Bundle out) { super.onSaveInstanceState(out); web.saveState(out); }
