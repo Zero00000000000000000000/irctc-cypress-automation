@@ -1,9 +1,6 @@
 name: IRCTC Automation Booking
 on:
-  push:
-    branches:
-      - 'main'
-  pull_request:
+  # Keep this legacy Cypress workflow manual; Android PRs should not trigger it.
   workflow_dispatch:
     inputs:
       USERNAME:
